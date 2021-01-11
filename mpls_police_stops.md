@@ -26,7 +26,7 @@ Minneapolis Police Stop Data:
 ## Load libraries
 
 # read
-library(tidycensus); census_api_key("0c5d9fddc67544f23d3fa524660c9d81d4be2c90")
+library(tidycensus); census_api_key("") # add API key here
 
 # wrangle
 library(tidyverse)
