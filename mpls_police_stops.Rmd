@@ -1,0 +1,429 @@
+---
+title: "Mpls Police Stop Data"
+author: Richard Bamattre
+date: "2020-12-22"
+output: rmarkdown::github_document
+---
+
+**Purpose**
+
+Apply Stanford's Open Policing methodology on Mpls Police Data.
+
+https://openpolicing.stanford.edu/
+
+They have an R script for Saint Paul but not Mpls.
+
+**Description**
+
+
+
+**Data Sources**
+
+Minneapolis Police Stop Data: https://opendata.minneapolismn.gov/datasets/police-stop-data
+
+*Other Notes*
+
+
+
+*Change log*
+
+
+```{r setup, warning = FALSE, message = FALSE}
+## Load libraries
+
+# read
+library(tidycensus); census_api_key("") # add API key here
+
+# wrangle
+library(tidyverse)
+library(lubridate) # work with dates and times
+
+# viz
+library(janitor) # clean names and make nice tables
+library(gghighlight)
+library(ggthemes)
+library(gt) # nice tables
+
+# model
+library(sf) # GIS
+
+# export
+
+## Custom functions
+
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+```
+
+# Read
+
+Get police stop data.
+
+Use an API link (ArcGIS) to directly download the latest geojson using st_read
+
+Looking at the first rows of the data:
+
+```{r read}
+stop <- st_read("https://opendata.arcgis.com/datasets/215b4b543d894750aef86c725b56ee2a_0.geojson")
+
+head(stop)
+```
+# Overview of the Data
+
+How many total stops? Distinct count of master incident numbers.
+
+```{r total stops}
+n_distinct(stop$masterIncidentNumber)
+```
+
+What's the date range?
+
+```{r dates}
+min(stop$responseDate)
+max(stop$responseDate)
+```
+
+Let's focus on 2016-2020. Convert from sf to a tibble - faster to work with, and can join geometry back later on.
+
+```{r filter to years}
+stop2 <- stop %>%
+  filter(year(responseDate) >= 2017,
+         year(responseDate) < 2021) %>%
+  as_tibble() %>%
+  select(-geometry)
+```
+
+For now, look at vehicular stops. Try doing pedestrian stops later.
+
+```{r stop reasons}
+stop2 %>% 
+  tabyl(reason) %>% 
+  adorn_pct_formatting() %>%
+  gt()
+```
+
+```{r stop problems}
+stop2 %>% 
+  tabyl(problem) %>% 
+  adorn_pct_formatting() %>%
+  gt()
+```
+
+What's the interaction between reasons and problems?
+
+```{r reasons problems}
+stop2 %>% 
+  tabyl(reason, problem) %>% 
+  gt()
+```
+
+### Missing data
+
+Do we know why many stop reasons are NA? Race and Vehicle/Person search for these are NA as well, so drop from the data.
+
+```{r}
+stop2 %>%
+  filter(is.na(reason)) %>%
+  tabyl(race)
+```
+
+
+### Filtering data
+
+Does it make sense to include both Suspicious Vehicles and Traffic Law Enforcement as problems? Also filter out missing reasons.
+
+How many stops now?
+
+```{r filter again}
+stop_v <- stop2 %>%
+  filter(problem %in% c("Suspicious Vehicle (P)", "Traffic Law Enforcement (P)"),
+         !is.na(reason))
+
+n_distinct(stop_v$masterIncidentNumber) # only one incident per row, so we can do a row count
+```
+
+How many by year?
+
+```{r stops by year}
+stop_v %>%
+  mutate(year = year(responseDate)) %>%
+  count(year) %>%
+  gt()
+```
+
+How many stops by race?
+
+```{r race}
+stop_v %>%
+  tabyl(race) %>%
+  adorn_pct_formatting() %>%
+  gt()
+```
+
+Stops by race over the years:
+
+```{r}
+stop_v %>%
+  mutate(year = year(responseDate)) %>%
+  count(year, race) %>%
+  ggplot(aes(year, n, color = race)) +
+    geom_line(size = 1) +
+    geom_point() +
+    gghighlight(race %in% c("White", "Black", "East African", "Unknown",
+                            "Latino", NA)) +
+    theme_fivethirtyeight() +
+    labs(title = "Police stops over time by race")
+```
+
+A few observations:
+
+- Stops overall seem to have gone down since 2018
+- There are more unknown race in more recent data (2020)
+- There was more missing data (represented by the black line) in 2017-2018 (about 5000 a year) but this has reduced in recent years (better data collection methods?)
+- Black people are stopped the most, followed by white people
+- In other jurisdictions, East African would (likely) be included with the Black race
+
+# Benchmark Test
+
+Get a population as a baseline to compare stop rates. Are black/East African drivers stopped proportionally more than other drivers?
+
+Get the population estimates from the census using tidycensus
+
+```{r}
+# list of variables to get and their names
+var <- c(
+  "Total" = "DP05_0033",
+  "White" = "DP05_0077", # using white non-hispanic
+  "Black" = "DP05_0038",
+  "Native American" = "DP05_0039",
+  "Asian" = "DP05_0044",
+  "Latino" = "DP05_0071", # hispanic/latinx of any race
+  "Other" = "DP05_0057" # some other race
+)
+
+# query census API with list of variables
+
+mpls_race <- get_acs(
+  geography = "place", state = "MN",
+  year = 2019,
+  survey = "acs5", # get 5 year estimates - smaller margin of error and more appropriate for multi-year data
+  variables = var
+) %>%
+  filter(str_detect(NAME, "Minneapolis")) %>% # get only Minneapolis from other MN places
+  select(-c(moe, GEOID, NAME))
+
+# get percentages (out of total)
+
+mpls_race %>%
+  mutate(total = estimate[variable == "Total"]) %>%
+  mutate(prop = estimate / total) %>%
+  select(-c(total)) %>%
+  gt() %>%
+    fmt_percent(
+      columns = vars(prop),
+      decimals = 1
+    )
+```
+
+To match census data, combine East African with black drivers. 
+
+```{r combine race}
+stop_v2 <- stop_v %>%
+  mutate(race2 = if_else(race == "East African", "Black", race))
+
+stop_v2 %>%
+  tabyl(race2) %>%
+  adorn_pct_formatting() %>%
+  gt()
+```
+
+## Stop Rates
+
+What is the rate of police stops considering the population of races in Mpls?
+
+Not sure what to do about Unknown/NA - quite a few in this category
+
+```{r stop rates}
+stop_v2 %>%
+  count(race2) %>%
+  left_join(mpls_race, by = c("race2" = "variable")) %>%
+  mutate(stop_rate = n / estimate) %>%
+  gt() %>%
+    fmt_number(
+      columns = vars(stop_rate),
+      decimals = 2
+    )
+```
+
+Black drivers are stopped more than 5 times compared to white drivers. Latinx slightly more. Native American drivers are stopped 1.5 times more than white drivers.
+
+## Search Rates
+
+What proportion of drivers of each race are searched (vehicle or person)?
+
+```{r search rates}
+stop_v2 %>%
+  group_by(race2) %>%
+  summarize(
+    search_rate = mean(vehicleSearch == "YES", na.rm = TRUE),
+    frisk_rate = mean(personSearch == "YES", na.rm = TRUE)
+  ) %>%
+  gt() %>%
+    fmt_number(
+      columns = vars(search_rate, frisk_rate),
+      decimals = 2
+    )
+```
+
+Black drivers are 3 times more likely to have their vehicle searched or be frisked than white drivers. Native American drivers are 4.7 times more likely for vehicle searches and 5.8 times for being frisked.
+
+## Caveats
+
+Here the caveats from the [Stanford Open Policing Project](https://openpolicing.stanford.edu/tutorials/) are important. These rates are not in themselves evidence of bias or discrimination because we don't know the underlying rates of breaking traffic laws or committing crimes. Also it may reflect differences in transportation across races.
+
+# Outcome Test
+
+## Hit Rate (Citations and Booking)
+
+Here we could look at hit rate or the contraband recovery rate - how often searches were justified by finding contraband.
+
+We don't have that in this data set. We do have whether a citation was issued (as its own variable) and booking as part of the call disposition variable.
+
+Should we look at vehicle and person search (frisking) separately?
+
+```{r types of searches}
+stop_v2 %>% 
+  tabyl(personSearch, vehicleSearch) %>%
+  gt()
+```
+
+Actually, vehicle combined with person searches are more common than either search alone. To simplify, we can create a variable specifying whether any type of search is conducted.
+
+```{r outcomes vehicle search}
+stop_v3 <- stop_v2 %>%
+  mutate(any_search = if_else(personSearch == "YES" | vehicleSearch == "YES",
+                              1, 0))
+  
+stop_v3 %>%
+  filter(any_search == 1) %>%
+  group_by(race2) %>%
+  summarize(
+    citation_rate = mean(citationIssued == "YES", na.rm = TRUE),
+    book_rate = mean(callDisposition == "BKG-Booking", na.rm = TRUE)
+  ) %>%
+  gt() %>%
+    fmt_number(
+      columns = vars(citation_rate, book_rate),
+      decimals = 2
+    )
+```
+
+Here lower rates could signal discrimination. If black drivers are stopped but only cited or booked 5% of the time, and white drivers 50% of the time, "would lead us to believe that officers made sure they were certain white individuals had contraband before deciding to search, but that they were searching black individuals on a whiff of evidence" (Stanford Open Policing Project).
+
+Here we see black drivers have a higher citation rate than white drivers - Native American drivers have a somewhat lower rate. However, 45% of searches end up with white drivers booked, but only 32% of black drivers, and 32% of Latinx drivers. Here Native American drivers have a higher book rate.
+
+```{r rates over time}
+stop_v3 %>%
+  filter(any_search == 1) %>%
+  mutate(year = year(responseDate)) %>%
+  group_by(year, race2) %>%
+  summarize(
+    citation_rate = mean(citationIssued == "YES", na.rm = TRUE),
+    book_rate = mean(callDisposition == "BKG-Booking", na.rm = TRUE)
+  ) %>%
+  pivot_longer(citation_rate:book_rate, names_to = "rate", values_to = "value") %>%
+  filter(race2 %in% c("White", "Black", "Native American", "Latino")) %>%
+  ggplot(aes(year, value, color = race2)) +
+    geom_line(size = 1) +
+    facet_wrap(~ rate) +
+    theme_fivethirtyeight() +
+    labs(title = "Rates of booking and citations by race over time",
+         color = "") +
+    scale_y_continuous(labels = scales::percent_format(accuracy = 1))
+```
+
+
+## By Neighborhood
+
+Does the citation or booking rate differ across police precincts? There are only 5 precincts, may not be useful to see. What about Minneapolis neighborhoods?
+
+```{r}
+rates <- stop_v3 %>%
+  filter(any_search == 1) %>%
+  group_by(race2, neighborhood) %>%
+  summarize(
+    citation_rate = mean(citationIssued == "YES", na.rm = TRUE),
+    book_rate = mean(callDisposition == "BKG-Booking", na.rm = TRUE)
+  )
+
+# What are the total stops by neighborhood?
+
+stops_by_nh <- stop_v3 %>%
+  filter(any_search == 1) %>%
+  group_by(neighborhood) %>%
+  summarize(stops = n())
+
+# make a tidy data frame with white rates, and minority rates per neighborhood
+
+citation_rate <- rates %>%
+  ungroup() %>%
+  select(-book_rate) %>%
+  filter(race2 %in% c("White", "Black", "Latino"),
+         !is.na(neighborhood)) %>%
+  pivot_wider(names_from = "race2", values_from = "citation_rate",
+              values_fill = 0) %>%
+  left_join(stops_by_nh, by = "neighborhood") %>%
+  pivot_longer(c(Black:Latino), names_to = "minority_race",
+               values_to = "minority_citation_rate") %>%
+  rename(white_citation_rate = White)
+
+book_rate <- rates %>%
+  ungroup() %>%
+  select(-citation_rate) %>%
+  filter(race2 %in% c("White", "Black", "Latino"),
+         !is.na(neighborhood)) %>%
+  pivot_wider(names_from = "race2", values_from = "book_rate",
+              values_fill = 0) %>%
+  left_join(stops_by_nh, by = "neighborhood") %>%
+  pivot_longer(c(Black:Latino), names_to = "minority_race",
+               values_to = "minority_book_rate") %>%
+  rename(white_book_rate = White)
+
+citation_rate %>%
+  ggplot(aes(x = white_citation_rate, y = minority_citation_rate)) +
+    geom_point(aes(size = stops), pch = 21) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+    facet_wrap(~ minority_race) +
+    scale_y_continuous(labels = scales::percent_format()) +
+    scale_x_continuous(labels = scales::percent_format()) +
+    labs(y = "Minority Citation Rate", x = "White Citation Rate",
+         title = "Comparing Citation Rates by Neighborhood")
+
+book_rate %>%
+  ggplot(aes(x = white_book_rate, y = minority_book_rate)) +
+    geom_point(aes(size = stops), pch = 21) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+    facet_wrap(~ minority_race) +
+    scale_y_continuous(labels = scales::percent_format()) +
+    scale_x_continuous(labels = scales::percent_format()) +
+    labs(y = "Minority Book Rate", x = "White Book Rate",
+         title = "Comparing Book Rates by Neighborhood")
+```
+
+For most neighborhoods, the citation rate is higher or the same for white drivers as it is for black or Latinx drivers.
+
+For book rates though, the majority of neighborhoods, particularly those with the most stops, have lower rates for black/Latinx drivers.
+
+This signals that officers are applying lower threshholds to minority drivers when it comes to offenses that are bookable. I think.
+
+# Model
+
+```{r model}
+
+```
+
+# Export
+
+```{r export}
+
+```
+
