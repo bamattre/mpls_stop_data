@@ -2,7 +2,7 @@
 title: "Mpls Police Stop Data"
 author: Richard Bamattre
 date: "2020-12-22"
-output: rmarkdown::github_document
+output: html_document
 ---
 
 **Purpose**
