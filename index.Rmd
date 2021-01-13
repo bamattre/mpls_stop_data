@@ -32,7 +32,7 @@ Minneapolis Police Stop Data: https://opendata.minneapolismn.gov/datasets/police
 ## Load libraries
 
 # read
-library(tidycensus); census_api_key("") # add API key here
+library(tidycensus); census_api_key("", install = TRUE) # add API key here
 
 # wrangle
 library(tidyverse)
